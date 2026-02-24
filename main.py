@@ -7,25 +7,32 @@ Quickstart: https://github.com/google-gemini/cookbook/blob/main/quickstarts/Get_
 To install the dependencies for this script, run:
 
 ```
-pip install google-genai opencv-python pyaudio pillow mss
+pip install google-genai pyaudio python-dotenv
 ```
 """
 
 import os
+import sys
+import logging
+import argparse
+from dotenv import load_dotenv
 import asyncio
-import base64
-import io
 import traceback
 
-import cv2
-import pyaudio
-import PIL.Image
+load_dotenv()
 
-import argparse
+import pyaudio
 
 from google import genai
 from google.genai import types
-from google.genai.types import Type
+
+# Configure logging
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
+)
+logger = logging.getLogger(__name__)
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -34,8 +41,6 @@ RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
 
 MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
-
-DEFAULT_MODE = "camera"
 
 client = genai.Client(
     http_options={"api_version": "v1beta"},
@@ -67,9 +72,7 @@ pya = pyaudio.PyAudio()
 
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE):
-        self.video_mode = video_mode
-
+    def __init__(self):
         self.audio_in_queue = None
         self.out_queue = None
 
@@ -89,186 +92,140 @@ class AudioLoop:
             )
             if text.lower() == "q":
                 break
+            if text:
+                print(f"User: {text}")
             if self.session is not None:
                 await self.session.send(input=text or ".", end_of_turn=True)
-
-    def _get_frame(self, cap):
-        # Read the frameq
-        ret, frame = cap.read()
-        # Check if the frame was read successfully
-        if not ret:
-            return None
-        # Fix: Convert BGR to RGB color space
-        # OpenCV captures in BGR but PIL expects RGB format
-        # This prevents the blue tint in the video feed
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = PIL.Image.fromarray(frame_rgb)  # Now using RGB frame
-        img.thumbnail([1024, 1024])
-
-        image_io = io.BytesIO()
-        img.save(image_io, format="jpeg")
-        image_io.seek(0)
-
-        mime_type = "image/jpeg"
-        image_bytes = image_io.read()
-        return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
-
-    async def get_frames(self):
-        # This takes about a second, and will block the whole program
-        # causing the audio pipeline to overflow if you don't to_thread it.
-        cap = await asyncio.to_thread(
-            cv2.VideoCapture, 0
-        )  # 0 represents the default camera
-
-        while True:
-            frame = await asyncio.to_thread(self._get_frame, cap)
-            if frame is None:
-                break
-
-            await asyncio.sleep(1.0)
-
-            if self.out_queue is not None:
-                await self.out_queue.put(frame)
-
-        # Release the VideoCapture object
-        cap.release()
-
-    def _get_screen(self):
-        try:
-            import mss  # pytype: disable=import-error # pylint: disable=g-import-not-at-top
-        except ImportError as e:
-            raise ImportError("Please install mss package using 'pip install mss'") from e
-        sct = mss.mss()
-        monitor = sct.monitors[0]
-
-        i = sct.grab(monitor)
-
-        mime_type = "image/jpeg"
-        image_bytes = mss.tools.to_png(i.rgb, i.size)
-        img = PIL.Image.open(io.BytesIO(image_bytes))
-
-        image_io = io.BytesIO()
-        img.save(image_io, format="jpeg")
-        image_io.seek(0)
-
-        image_bytes = image_io.read()
-        return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
-
-    async def get_screen(self):
-
-        while True:
-            frame = await asyncio.to_thread(self._get_screen)
-            if frame is None:
-                break
-
-            await asyncio.sleep(1.0)
-
-            if self.out_queue is not None:
-                await self.out_queue.put(frame)
 
     async def send_realtime(self):
         while True:
             if self.out_queue is not None:
                 msg = await self.out_queue.get()
                 if self.session is not None:
-                    await self.session.send(input=msg)
+                    try:
+                        await self.session.send(input=msg)
+                    except Exception as e:
+                        logger.error(f"Error sending realtime data: {e}")
 
     async def listen_audio(self):
-        mic_info = pya.get_default_input_device_info()
-        self.audio_stream = await asyncio.to_thread(
-            pya.open,
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=SEND_SAMPLE_RATE,
-            input=True,
-            input_device_index=mic_info["index"],
-            frames_per_buffer=CHUNK_SIZE,
-        )
-        if __debug__:
-            kwargs = {"exception_on_overflow": False}
-        else:
-            kwargs = {}
-        while True:
-            data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
-            if self.out_queue is not None:
-                await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
+        try:
+            mic_info = pya.get_default_input_device_info()
+            self.audio_stream = await asyncio.to_thread(
+                pya.open,
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=SEND_SAMPLE_RATE,
+                input=True,
+                input_device_index=mic_info["index"],
+                frames_per_buffer=CHUNK_SIZE,
+            )
+            if __debug__:
+                kwargs = {"exception_on_overflow": False}
+            else:
+                kwargs = {}
+            
+            logger.info("Listening to audio...")
+            while True:
+                data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
+                if self.out_queue is not None:
+                    await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
+        except Exception as e:
+            logger.error(f"Error in listen_audio: {e}")
 
     async def receive_audio(self):
         "Background task to reads from the websocket and write pcm chunks to the output queue"
         while True:
             if self.session is not None:
-                turn = self.session.receive()
-                async for response in turn:
-                    if data := response.data:
-                        self.audio_in_queue.put_nowait(data)
-                        continue
-                    if text := response.text:
-                        print(text, end="")
+                try:
+                    first_text = True
+                    async for response in self.session.receive():
+                        if data := response.data:
+                            self.audio_in_queue.put_nowait(data)
+                        
+                        if text := response.text:
+                            if first_text:
+                                print("\nGemini: ", end="", flush=True)
+                                first_text = False
+                            print(text, end="", flush=True)
+                        
+                        # If a turn is complete, reset the Gemini prefix for the next response
+                        if response.server_content and response.server_content.turn_complete:
+                            print() # New line after Gemini's turn
+                            first_text = True
 
-                # If you interrupt the model, it sends a turn_complete.
-                # For interruptions to work, we need to stop playback.
-                # So empty out the audio queue because it may have loaded
-                # much more audio than has played yet.
-                while not self.audio_in_queue.empty():
-                    self.audio_in_queue.get_nowait()
+                    # Empty audio queue if interrupted
+                    while not self.audio_in_queue.empty():
+                        self.audio_in_queue.get_nowait()
+                except Exception as e:
+                    logger.error(f"Error in receive_audio: {e}")
+                    await asyncio.sleep(1)
 
     async def play_audio(self):
-        stream = await asyncio.to_thread(
-            pya.open,
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=RECEIVE_SAMPLE_RATE,
-            output=True,
-        )
-        while True:
-            if self.audio_in_queue is not None:
-                bytestream = await self.audio_in_queue.get()
-                await asyncio.to_thread(stream.write, bytestream)
+        try:
+            stream = await asyncio.to_thread(
+                pya.open,
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=RECEIVE_SAMPLE_RATE,
+                output=True,
+            )
+            while True:
+                if self.audio_in_queue is not None:
+                    bytestream = await self.audio_in_queue.get()
+                    await asyncio.to_thread(stream.write, bytestream)
+        except Exception as e:
+            logger.error(f"Error in play_audio: {e}")
 
     async def run(self):
         try:
+            logger.info("Connecting to Gemini...")
             async with (
                 client.aio.live.connect(model=MODEL, config=CONFIG) as session,
                 asyncio.TaskGroup() as tg,
             ):
                 self.session = session
+                logger.info("Connected.")
 
                 self.audio_in_queue = asyncio.Queue()
                 self.out_queue = asyncio.Queue(maxsize=5)
 
-                send_text_task = tg.create_task(self.send_text())
+                tg.create_task(self.send_text())
                 tg.create_task(self.send_realtime())
                 tg.create_task(self.listen_audio())
-                if self.video_mode == "camera":
-                    tg.create_task(self.get_frames())
-                elif self.video_mode == "screen":
-                    tg.create_task(self.get_screen())
-
                 tg.create_task(self.receive_audio())
                 tg.create_task(self.play_audio())
 
-                await send_text_task
-                raise asyncio.CancelledError("User requested exit")
+                logger.info("All tasks started. Ready to chat!")
+                
+                # Keep the task group alive until manually cancelled or session ends
+                while True:
+                    await asyncio.sleep(1)
 
         except asyncio.CancelledError:
-            pass
-        except ExceptionGroup as EG:
+            logger.info("Session cancelled.")
+        except Exception as e:
+            logger.error(f"Error in run loop: {e}")
             if self.audio_stream is not None:
                 self.audio_stream.close()
-                traceback.print_exception(EG)
+            traceback.print_exc()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Gemini Audio Live Demo")
     parser.add_argument(
-        "--mode",
+        "--log-level",
         type=str,
-        default=DEFAULT_MODE,
-        help="pixels to stream from",
-        choices=["camera", "screen", "none"],
+        default="WARNING",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (default: WARNING)"
     )
     args = parser.parse_args()
-    main = AudioLoop(video_mode=args.mode)
-    asyncio.run(main.run())
-
-
+    
+    # Update logging level based on argument
+    logging.getLogger().setLevel(getattr(logging, args.log_level))
+    
+    main = AudioLoop()
+    try:
+        asyncio.run(main.run())
+    except KeyboardInterrupt:
+        pass

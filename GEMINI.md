@@ -1,25 +1,23 @@
-# Gemini Live Demo
+# Gemini Audio Live Demo
 
-A Python application for real-time multimodal interaction with Google Gemini models, enabling seamless audio and visual conversations.
+A Python application for real-time audio interaction with Google Gemini models, enabling seamless voice conversations.
 
 ## Project Overview
 
-This project provides a demonstration of the Gemini Live API, allowing users to talk to the Gemini model and share their camera or screen in real-time. It uses the `google-genai` SDK to connect to models capable of native audio processing.
+This project provides a demonstration of the Gemini Live API, allowing users to talk to the Gemini model in real-time. It uses the `google-genai` SDK to connect to models capable of native audio processing.
 
 ### Key Features
 - **Real-time Audio:** Low-latency, bidirectional audio communication.
-- **Visual Context:** Stream camera feed or screen content to the model for visual reasoning.
-- **Multimodal Interaction:** Supports simultaneous text, audio, and visual inputs.
 - **Voice Selection:** Customizable prebuilt voices (defaulting to "Zephyr").
+- **Google Search Integration:** The model can use Google Search to provide up-to-date information.
 
 ## Architecture
 
 The application is built around an `AudioLoop` class that manages multiple concurrent tasks using Python's `asyncio`:
 - `listen_audio`: Captures microphone input.
-- `send_realtime`: Streams audio and video frames to the model.
+- `send_realtime`: Streams audio chunks to the model.
 - `receive_audio`: Handles model responses.
 - `play_audio`: Outputs the model's audio response.
-- `get_frames`/`get_screen`: Captures visual input at periodic intervals.
 
 ## Getting Started
 
@@ -38,9 +36,13 @@ uv sync
 ```
 
 ### Environment Setup
-Set your Gemini API key:
+Create a `.env` file in the root directory based on `.env.example`:
 ```bash
-export GEMINI_API_KEY='your_api_key_here'
+cp .env.example .env
+```
+Then, edit `.env` and add your Gemini API key:
+```
+GEMINI_API_KEY='your_api_key_here'
 ```
 
 ### Running the Application
@@ -48,21 +50,12 @@ Start the demo using `uv run`:
 ```bash
 uv run main.py
 ```
-
-To stream your screen instead:
-```bash
-python main.py --mode screen
-```
-
-To run with audio only:
-```bash
-python main.py --mode none
-```
+Type your message or just speak. Type `q` to quit.
 
 ## Development Conventions
 
 - **Asyncio Usage:** All network and I/O operations are handled asynchronously.
-- **Threading:** Blocking calls (like camera capture and audio I/O) are offloaded to threads using `asyncio.to_thread`.
+- **Threading:** Blocking calls (like audio I/O) are offloaded to threads using `asyncio.to_thread`.
 - **Audio Configuration:**
   - Format: `paInt16` (16-bit PCM)
   - Channels: `1` (Mono)
