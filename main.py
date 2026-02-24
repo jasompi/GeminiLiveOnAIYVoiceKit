@@ -15,6 +15,7 @@ import os
 import sys
 import logging
 import argparse
+import time
 from dotenv import load_dotenv
 import asyncio
 import traceback
@@ -195,13 +196,40 @@ pya = pyaudio.PyAudio()
 
 
 class AudioLoop:
-    def __init__(self, transcript=True):
+    def __init__(self, transcript=True, timeout=20):
         self.audio_in_queue = None
         self.out_queue = None
 
         self.session = None
         self.transcript = transcript
+        self.timeout = timeout
         self.stop_event = asyncio.Event()
+        self.last_activity_time = time.monotonic()
+        self.exit_after_response = False
+
+    def _update_activity(self):
+        self.last_activity_time = time.monotonic()
+
+    async def check_timeout(self):
+        while not self.stop_event.is_set():
+            await asyncio.sleep(1)
+            elapsed = time.monotonic() - self.last_activity_time
+            if elapsed > self.timeout:
+                logger.warning(f"Silence timeout reached ({self.timeout}s). Exiting...")
+                # Simulate user saying goodbye to trigger graceful exit
+                self.exit_after_response = True
+                if self.session is not None:
+                    try:
+                        await self.session.send_client_content(
+                            turns=[types.Content(parts=[types.Part(text="goodbye")])],
+                            turn_complete=True
+                        )
+                    except Exception as e:
+                        logger.error(f"Error sending timeout goodbye: {e}")
+                        self.stop_event.set()
+                else:
+                    self.stop_event.set()
+                break
 
     async def send_text(self):
         loop = asyncio.get_running_loop()
@@ -235,8 +263,14 @@ class AudioLoop:
                 if text.lower() == "q":
                     self.stop_event.set()
                     break
-                if text and self.transcript:
-                    print(f"User: {text}")
+                if text:
+                    self._update_activity()
+                    if self.transcript:
+                        print(f"User: {text}")
+                    
+                    if any(word in text.lower() for word in ["goodbye", "bye-bye"]):
+                        self.exit_after_response = True
+                        
                 if self.session is not None:
                     await self.session.send_client_content(
                         turns=[types.Content(parts=[types.Part(text=text or ".")])],
@@ -306,6 +340,7 @@ class AudioLoop:
                         
                         # Manually handle server_content to avoid property warnings
                         if response.server_content:
+                            self._update_activity()
                             # 1. Handle model turn (audio data and/or text)
                             if response.server_content.model_turn:
                                 for part in response.server_content.model_turn.parts:
@@ -317,20 +352,21 @@ class AudioLoop:
                                             first_text = False
                                         print(part.text, end="", flush=True)
 
-                            if not self.transcript:
-                                continue
-
                             # 2. Handle User's input audio transcription (can be partial)
                             if in_trans := response.server_content.input_transcription:
                                 if in_trans.text:
-                                    print(f"\rUser (audio): {in_trans.text}", end="", flush=True)
+                                    if self.transcript:
+                                        print(f"\rUser (audio): {in_trans.text}", end="", flush=True)
+                                    if any(word in in_trans.text.lower() for word in ["goodbye", "bye-bye"]):
+                                        self.exit_after_response = True
                                     if in_trans.finished:
-                                        print() # New line when user is done talking
+                                        if self.transcript:
+                                            print() # New line when user is done talking
                                         first_text = True
 
                             # 3. Handle Gemini's output transcription (streaming)
                             if out_trans := response.server_content.output_transcription:
-                                if out_trans.text:
+                                if out_trans.text and self.transcript:
                                     if first_text:
                                         print("\nGemini: ", end="", flush=True)
                                         first_text = False
@@ -339,7 +375,14 @@ class AudioLoop:
                         # If a turn is complete, reset the Gemini prefix for the next response
                         if response.server_content and response.server_content.turn_complete:
                             if not first_text:
-                                print() # New line after Gemini's turn
+                                if self.transcript:
+                                    print() # New line after Gemini's turn
+                            
+                            if self.exit_after_response:
+                                logger.info("User said goodbye. Exiting...")
+                                self.stop_event.set()
+                                break
+                            
                             first_text = True
 
                     # Empty audio queue if interrupted
@@ -364,6 +407,7 @@ class AudioLoop:
                 if self.audio_in_queue is not None:
                     try:
                         bytestream = await asyncio.wait_for(self.audio_in_queue.get(), timeout=0.1)
+                        self._update_activity()
                         await asyncio.to_thread(stream.write, bytestream)
                     except asyncio.TimeoutError:
                         continue
@@ -396,6 +440,7 @@ class AudioLoop:
                 self.audio_in_queue = asyncio.Queue()
                 self.out_queue = asyncio.Queue(maxsize=5)
 
+                tg.create_task(self.check_timeout())
                 tg.create_task(self.send_text())
                 tg.create_task(self.send_realtime())
                 tg.create_task(self.listen_audio(pya))
@@ -430,17 +475,23 @@ if __name__ == "__main__":
         help="Set the logging level (default: WARNING)"
     )
     parser.add_argument(
-        "--output",
+        "--transcript",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Output the transcript of the conversation to stdout (default: True)"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=20,
+        help="Silence timeout in seconds (default: 20)"
     )
     args = parser.parse_args()
     
     # Update logging level based on argument
     logging.getLogger().setLevel(getattr(logging, args.log_level))
     
-    main = AudioLoop(transcript=args.output)
+    main = AudioLoop(transcript=args.transcript, timeout=args.timeout)
     try:
         asyncio.run(main.run())
     except KeyboardInterrupt:
