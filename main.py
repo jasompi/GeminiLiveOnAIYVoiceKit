@@ -196,11 +196,12 @@ pya = pyaudio.PyAudio()
 
 
 class AudioLoop:
-    def __init__(self, transcript=True, timeout=20):
+    def __init__(self, voice="Zephyr", transcript=True, timeout=20):
         self.audio_in_queue = None
         self.out_queue = None
 
         self.session = None
+        self.voice = voice
         self.transcript = transcript
         self.timeout = timeout
         self.stop_event = asyncio.Event()
@@ -424,6 +425,7 @@ class AudioLoop:
         try:
             # Create a copy of the config and update modalities
             config = CONFIG.model_copy(deep=True)
+            config.speech_config.voice_config.prebuilt_voice_config.voice_name = self.voice
             if self.transcript:
                 # Enable transcription for both input and output
                 config.input_audio_transcription = types.AudioTranscriptionConfig()
@@ -486,12 +488,20 @@ if __name__ == "__main__":
         default=20,
         help="Silence timeout in seconds (default: 20)"
     )
+    voice_names = [v["voice_name"] for v in VOICES]
+    parser.add_argument(
+        "--voice",
+        type=str,
+        default="Zephyr",
+        choices=voice_names,
+        help="Choose a prebuilt voice for Gemini (default: Zephyr)"
+    )
     args = parser.parse_args()
     
     # Update logging level based on argument
     logging.getLogger().setLevel(getattr(logging, args.log_level))
     
-    main = AudioLoop(transcript=args.transcript, timeout=args.timeout)
+    main = AudioLoop(voice=args.voice, transcript=args.transcript, timeout=args.timeout)
     try:
         asyncio.run(main.run())
     except KeyboardInterrupt:
