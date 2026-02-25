@@ -335,6 +335,7 @@ class AudioLoop:
             if self.session is not None:
                 try:
                     first_text = True
+                    current_user_transcript = ""
                     async for response in self.session.receive():
                         if self.stop_event.is_set():
                             break
@@ -356,13 +357,15 @@ class AudioLoop:
                             # 2. Handle User's input audio transcription (can be partial)
                             if in_trans := response.server_content.input_transcription:
                                 if in_trans.text:
+                                    current_user_transcript += in_trans.text
                                     if self.transcript:
-                                        print(f"\rUser (audio): {in_trans.text}", end="", flush=True)
-                                    if any(word in in_trans.text.lower() for word in ["goodbye", "bye-bye"]):
+                                        print(f"\033[2K\rUser (audio): {current_user_transcript}", end="", flush=True)
+                                    if any(word in current_user_transcript.lower() for word in ["goodbye", "bye-bye"]):
                                         self.exit_after_response = True
                                     if in_trans.finished:
                                         if self.transcript:
                                             print() # New line when user is done talking
+                                        current_user_transcript = ""
                                         first_text = True
 
                             # 3. Handle Gemini's output transcription (streaming)
