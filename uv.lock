@@ -415,7 +415,7 @@ wheels = [
 ]
 
 [[package]]
-name = "geminilivedemo"
+name = "gemini-live-aiy-voice-kit"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
