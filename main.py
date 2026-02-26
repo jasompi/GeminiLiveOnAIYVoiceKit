@@ -18,6 +18,7 @@ import argparse
 import time
 from dotenv import load_dotenv
 import asyncio
+import queue
 import traceback
 
 load_dotenv()
@@ -40,6 +41,7 @@ CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
+AUDIO_OUT_BUFFER_FRAMES = 4096  # ~170ms at 24kHz; tolerates asyncio scheduling jitter
 
 MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 
@@ -391,11 +393,26 @@ class AudioLoop:
 
                     # Empty audio queue if interrupted
                     while not self.audio_in_queue.empty():
-                        self.audio_in_queue.get_nowait()
+                        try:
+                            self.audio_in_queue.get_nowait()
+                        except queue.Empty:
+                            break
                 except Exception as e:
                     if not self.stop_event.is_set():
                         logger.error(f"Error in receive_audio: {e}")
                     await asyncio.sleep(1)
+
+    def _run_playback_loop(self, stream):
+        """Synchronous audio drain loop, run inside a dedicated thread via asyncio.to_thread.
+        Eliminates per-write asyncio coroutine handoffs that cause ALSA underruns on RPi.
+        """
+        while not self.stop_event.is_set():
+            try:
+                bytestream = self.audio_in_queue.get(timeout=0.1)
+                self._update_activity()
+                stream.write(bytestream)
+            except queue.Empty:
+                continue
 
     async def play_audio(self, pya):
         stream = None
@@ -406,15 +423,9 @@ class AudioLoop:
                 channels=CHANNELS,
                 rate=RECEIVE_SAMPLE_RATE,
                 output=True,
+                frames_per_buffer=AUDIO_OUT_BUFFER_FRAMES,
             )
-            while not self.stop_event.is_set():
-                if self.audio_in_queue is not None:
-                    try:
-                        bytestream = await asyncio.wait_for(self.audio_in_queue.get(), timeout=0.1)
-                        self._update_activity()
-                        await asyncio.to_thread(stream.write, bytestream)
-                    except asyncio.TimeoutError:
-                        continue
+            await asyncio.to_thread(self._run_playback_loop, stream)
         except Exception as e:
             if not self.stop_event.is_set():
                 logger.error(f"Error in play_audio: {e}")
@@ -442,7 +453,7 @@ class AudioLoop:
                 self.session = session
                 logger.info("Connected.")
 
-                self.audio_in_queue = asyncio.Queue()
+                self.audio_in_queue = queue.Queue()
                 self.out_queue = asyncio.Queue(maxsize=5)
 
                 tg.create_task(self.check_timeout())
