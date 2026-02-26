@@ -198,7 +198,7 @@ pya = pyaudio.PyAudio()
 
 
 class AudioLoop:
-    def __init__(self, voice="Zephyr", transcript=True, timeout=20):
+    def __init__(self, voice="Zephyr", transcript=True, timeout=20, mic_threshold=300):
         self.audio_in_queue = None
         self.out_queue = None
 
@@ -206,6 +206,7 @@ class AudioLoop:
         self.voice = voice
         self.transcript = transcript
         self.timeout = timeout
+        self.is_playing = False
         self.stop_event = asyncio.Event()
         self.last_activity_time = time.monotonic()
         self.exit_after_response = False
@@ -322,6 +323,8 @@ class AudioLoop:
             while not self.stop_event.is_set():
                 data = await asyncio.to_thread(stream.read, CHUNK_SIZE, **kwargs)
                 if self.out_queue is not None:
+                    if self.is_playing:
+                        data = bytes(len(data))
                     await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
         except Exception as e:
             if not self.stop_event.is_set():
@@ -409,9 +412,11 @@ class AudioLoop:
         while not self.stop_event.is_set():
             try:
                 bytestream = self.audio_in_queue.get(timeout=0.1)
+                self.is_playing = True
                 self._update_activity()
                 stream.write(bytestream)
             except queue.Empty:
+                self.is_playing = False
                 continue
 
     async def play_audio(self, pya):
@@ -511,11 +516,14 @@ if __name__ == "__main__":
         help="Choose a prebuilt voice for Gemini (default: Zephyr)"
     )
     args = parser.parse_args()
-    
+
     # Update logging level based on argument
     logging.getLogger().setLevel(getattr(logging, args.log_level))
-    
-    main = AudioLoop(voice=args.voice, transcript=args.transcript, timeout=args.timeout)
+    main = AudioLoop(
+        voice=args.voice,
+        transcript=args.transcript,
+        timeout=args.timeout,
+    )
     try:
         asyncio.run(main.run())
     except KeyboardInterrupt:
